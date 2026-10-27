@@ -18,8 +18,11 @@ It works on front. For APIs we recommend [laravel-keycloak-guard](https://github
 
 This package was tested with:
 
-* Laravel: 5.8 / 7 / 8 / 9 / 10 / 11
-* Keycloak: 18.0.0
+* PHP: 8.2+
+* Laravel: 11 / 12 / 13 (tested on CI)
+* Keycloak: 18+
+
+Need an older Laravel? Use `vizir/laravel-keycloak-web-guard` 4.x.
 
 Any other version is not guaranteed to work.
 
@@ -41,6 +44,19 @@ Require the package
 ```
 composer require uepg/laravel-keycloak-web-guard
 ```
+
+### Migrating from `vizir/laravel-keycloak-web-guard`
+
+This is the same package under a new name. Swap the package:
+
+```
+composer remove vizir/laravel-keycloak-web-guard
+composer require uepg/laravel-keycloak-web-guard
+```
+
+The namespace changed from `Vizir\KeycloakWebGuard` to `Uepg\KeycloakWebGuard`. The old class names still work as aliases (your `config/auth.php`, models extending `KeycloakUser`, `catch` blocks...), but they are deprecated and will be removed on 6.0, so replace `Vizir\KeycloakWebGuard` with `Uepg\KeycloakWebGuard` in your code when you can.
+
+Then read the [CHANGELOG](CHANGELOG.md): token signatures are now verified by default.
 
 If you want to change routes or the default values for Keycloak, publish the config file:
 
@@ -88,9 +104,15 @@ The Keycloak Server url. Generally is something like: `https://your-domain.com/a
 
 The Keycloak realm. The default is `master`.
 
+*  `KEYCLOAK_VERIFY_SIGNATURE`
+
+Verify the signature of the access and ID tokens. Default is `true`.
+
+Keys are loaded from the realm JWKS endpoint (`jwks_uri`), so nothing else is required. If the key is rotated on Keycloak, we load the keys again.
+
 *  `KEYCLOAK_REALM_PUBLIC_KEY`
 
-The Keycloak Server realm public key (string).
+Optional. The Keycloak Server realm public key (string). If set, it's used to verify the signatures (RS256) instead of the JWKS endpoint. Remember to update it when you rotate the realm keys.
 
 In dashboard go to: Keycloak >> Realm Settings >> Keys >> RS256 >> Public Key.
 
@@ -110,9 +132,38 @@ In dashboard go to: Keycloak >> Clients >> Installation.
 
 We can cache the OpenId Configuration: it's a list of endpoints we require to Keycloak.
 
-If you activate it, *remember to flush the cache* when change the realm or url.
+If you activate it, *remember to flush the cache* when change the realm or url. The realm keys (JWKS) are cached too.
 
-Just add the options you would like as an array to the" to "Just add the options you would like to guzzle_options array on keycloak-web.php config file. For example:
+*  `KEYCLOAK_CACHE_OPENID_TTL`
+
+How long (seconds) to keep the OpenId Configuration and keys in cache. Default is `86400` (1 day). Empty caches forever.
+
+*  `KEYCLOAK_CACHE_USER_PROFILE`
+
+Keep the user profile (userinfo) in session until the access token changes. Default is `false`, which requests Keycloak on every page load. The token is still validated on every request.
+
+*  `KEYCLOAK_REDIRECT_URL`
+
+Page to redirect after login when there's no intended URL. Default is `/admin`.
+
+*  `KEYCLOAK_REDIRECT_LOGOUT`
+
+Page Keycloak redirects to after logout. Default is your app home.
+
+### Logout via POST
+
+The logout route accepts `GET` by default, so any link (or an `<img>` on another site) can log your user out. We recommend accepting only `POST`, which is protected by CSRF:
+
+```php
+'logout_methods' => ['POST'],
+```
+
+```blade
+<form method="POST" action="{{ route('keycloak.logout') }}">
+    @csrf
+    <button type="submit">Logout</button>
+</form>
+```
 
 ## Laravel Auth
 
@@ -201,11 +252,16 @@ Add this to your Controller's `__construct` method:
 ```php
 $this->middleware('keycloak-web-can:manage-something-cool');
 
-// For multiple roles, separate with '|'
+// For multiple roles, separate with '|' (user must have all of them)
 $this->middleware('keycloak-web-can:manage-something-cool|manage-something-nice|manage-my-application');
+
+// User must have at least one of the roles
+$this->middleware('keycloak-web-can-any:manage-something-cool|manage-something-nice');
 ```
 
-This middleware works searching for all roles on default resource (client_id).
+`keycloak-web-can-one` is the old name of `keycloak-web-can-any` and still works.
+
+These middlewares search for roles on default resource (client_id) and on realm roles.
 
 You can extend it and register your own middleware on Kernel.php or just use `Auth::hasRole($roles, $resource)` on your Controller.
 
@@ -309,8 +365,59 @@ Just add the options you would like to `guzzle_options` array on `keycloak-web.p
 ]
 ```
 
+### How can I show users on Laravel Pulse (or find a user by id)?
+
+Keycloak only gives us a user when we have their token, so by default `retrieveById()` returns `null`. Packages like [Laravel Pulse](https://pulse.laravel.com) call it to show users who are not logged in right now.
+
+Enable `KEYCLOAK_REMEMBER_USERS=true` and the user profile (userinfo) is kept in cache after login, so `retrieveById()` can return it:
+
+*  `KEYCLOAK_REMEMBER_USERS`: default `false`.
+*  `KEYCLOAK_REMEMBER_USERS_TTL`: seconds to keep the profile. Default is 30 days.
+*  `KEYCLOAK_REMEMBER_USERS_STORE`: cache store. Default is your default store.
+
+The profile is written once per session (or when it changes), not on every request. Remember it holds personal data (name, email...) in your cache.
+
+For users not in cache, you can register a resolver (in a service provider `boot()`), returning a profile array, an `Authenticatable` or `null`:
+
+```php
+use Uepg\KeycloakWebGuard\Auth\KeycloakWebUserProvider;
+
+KeycloakWebUserProvider::resolveUsersUsing(function ($identifier) {
+    return ['email' => $identifier, 'name' => MyDirectory::nameFor($identifier)];
+});
+```
+
+### How can I stop Keycloak errors from filling my logs?
+
+The package does not write to the log directly. Every error is a `Uepg\KeycloakWebGuard\Exceptions\KeycloakException` (or a subclass) sent to Laravel's exception handler with `report()`, so you control it like any other exception.
+
+* `KeycloakRequestException`: a request to Keycloak failed. Its log context has the method, URL, status code and the first 500 characters of the response body (request headers are never logged).
+* `KeycloakTokenException`: the token or user profile returned by Keycloak is not valid.
+* `KeycloakCallbackException`: Keycloak returned an error on the callback, or the state is invalid.
+
+On Laravel 11+ (`bootstrap/app.php`):
+
+```php
+->withExceptions(function (Exceptions $exceptions) {
+    // Ignore all of them...
+    $exceptions->dontReport(\Uepg\KeycloakWebGuard\Exceptions\KeycloakException::class);
+
+    // ...or just lower the level
+    $exceptions->level(\Uepg\KeycloakWebGuard\Exceptions\KeycloakRequestException::class, \Psr\Log\LogLevel::WARNING);
+})
+```
+
+On older versions, add the class to `$dontReport` in `app/Exceptions/Handler.php`.
+
 ## Developers
 
 * Mário Valney[@mariovalney](https://twitter.com/mariovalney) is the original developer of this package, now the Ponta Grossa State University is mantaining this fork.
 
 With contributors on GitHub :heart:
+
+### Running the tests
+
+```
+composer install
+composer test
+```

@@ -1,10 +1,11 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Auth;
+namespace Uepg\KeycloakWebGuard\Auth;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\UserProvider;
-use Vizir\KeycloakWebGuard\Models\KeycloakUser;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Config;
 
 class KeycloakWebUserProvider implements UserProvider
 {
@@ -14,6 +15,13 @@ class KeycloakWebUserProvider implements UserProvider
      * @var string
      */
     protected $model;
+
+    /**
+     * Custom resolver for retrieveById()
+     *
+     * @var callable|null
+     */
+    protected static $userResolver;
 
     /**
      * The Constructor
@@ -41,12 +49,102 @@ class KeycloakWebUserProvider implements UserProvider
     /**
      * Retrieve a user by their unique identifier.
      *
+     * We can't ask Keycloak about a user without its token, so this works
+     * only for users remembered on login ("remember_users" config) or through
+     * a resolver registered with resolveUsersUsing(). It's used by packages
+     * like Laravel Pulse to show users that are not logged in.
+     *
      * @param  mixed  $identifier
      * @return \Illuminate\Contracts\Auth\Authenticatable|null
      */
     public function retrieveById($identifier)
     {
-        throw new \BadMethodCallException('Unexpected method [retrieveById] call');
+        if (is_null($identifier) || $identifier === '') {
+            return null;
+        }
+
+        if (Config::get('keycloak-web.remember_users', false)) {
+            $profile = $this->cache()->get($this->rememberKey($identifier));
+
+            if (is_array($profile)) {
+                return $this->retrieveByCredentials($profile);
+            }
+        }
+
+        if (static::$userResolver) {
+            $user = call_user_func(static::$userResolver, $identifier, $this);
+
+            return is_array($user) ? $this->retrieveByCredentials($user) : ($user ?: null);
+        }
+
+        return null;
+    }
+
+    /**
+     * Register a callback to retrieve users not remembered in cache.
+     *
+     * The callback receives the identifier and this provider and should return
+     * a profile array (like Keycloak userinfo), an Authenticatable or null.
+     *
+     * @param  callable|null $callback
+     * @return void
+     */
+    public static function resolveUsersUsing(?callable $callback)
+    {
+        static::$userResolver = $callback;
+    }
+
+    /**
+     * Keep the user profile in cache, so retrieveById() can find it later.
+     *
+     * @param  Authenticatable $user
+     * @param  array $profile Keycloak userinfo
+     * @return void
+     */
+    public function rememberUser(Authenticatable $user, array $profile)
+    {
+        $identifier = $user->getAuthIdentifier();
+
+        if (is_null($identifier) || $identifier === '' || ! Config::get('keycloak-web.remember_users', false)) {
+            return;
+        }
+
+        $ttl = Config::get('keycloak-web.remember_users_ttl', 2592000);
+        $ttl = ($ttl === null || $ttl === '') ? null : (int) $ttl;
+
+        $this->cache()->put($this->rememberKey($identifier), $profile, $ttl);
+    }
+
+    /**
+     * Remove a remembered user
+     *
+     * @param  mixed $identifier
+     * @return void
+     */
+    public function forgetUser($identifier)
+    {
+        $this->cache()->forget($this->rememberKey($identifier));
+    }
+
+    /**
+     * The cache key for a remembered user
+     *
+     * @param  mixed $identifier
+     * @return string
+     */
+    protected function rememberKey($identifier)
+    {
+        return 'keycloak-web-user:' . $identifier;
+    }
+
+    /**
+     * The cache store for remembered users
+     *
+     * @return \Illuminate\Contracts\Cache\Repository
+     */
+    protected function cache()
+    {
+        return Cache::store(Config::get('keycloak-web.remember_users_store'));
     }
 
     /**

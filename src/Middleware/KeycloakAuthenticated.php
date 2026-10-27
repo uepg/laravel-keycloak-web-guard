@@ -1,6 +1,6 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Middleware;
+namespace Uepg\KeycloakWebGuard\Middleware;
 
 use Illuminate\Auth\Middleware\Authenticate;
 

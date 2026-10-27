@@ -1,16 +1,22 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Services;
+namespace Uepg\KeycloakWebGuard\Services;
 
 use Exception;
+use Firebase\JWT\JWK;
+use Firebase\JWT\JWT;
+use Firebase\JWT\Key;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
 use Illuminate\Support\Arr;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Route;
-use Vizir\KeycloakWebGuard\Auth\KeycloakAccessToken;
+use Throwable;
+use Uepg\KeycloakWebGuard\Auth\KeycloakAccessToken;
+use Uepg\KeycloakWebGuard\Exceptions\KeycloakException;
+use Uepg\KeycloakWebGuard\Exceptions\KeycloakRequestException;
+use Uepg\KeycloakWebGuard\Exceptions\KeycloakTokenException;
 
 class KeycloakService
 {
@@ -23,6 +29,11 @@ class KeycloakService
      * The Session key for state
      */
     public const KEYCLOAK_SESSION_STATE = '_keycloak_state';
+
+    /**
+     * The Session key for the cached user profile
+     */
+    public const KEYCLOAK_SESSION_PROFILE = '_keycloak_profile';
 
     /**
      * Keycloak URL
@@ -65,6 +76,34 @@ class KeycloakService
      * @var array
      */
     protected $cacheOpenid;
+
+    /**
+     * Keycloak OpenId Cache TTL in seconds (null caches forever)
+     *
+     * @var int|null
+     */
+    protected $cacheOpenidTtl;
+
+    /**
+     * Verify the JWT signatures
+     *
+     * @var bool
+     */
+    protected $verifySignature;
+
+    /**
+     * Realm public key used to verify signatures (instead of the JWKS endpoint)
+     *
+     * @var string
+     */
+    protected $realmPublicKey;
+
+    /**
+     * Keep the user profile in session while the access token does not change
+     *
+     * @var bool
+     */
+    protected $cacheUserProfile;
 
     /**
      * CallbackUrl
@@ -129,6 +168,23 @@ class KeycloakService
             $this->cacheOpenid = Config::get('keycloak-web.cache_openid', false);
         }
 
+        if (is_null($this->cacheOpenidTtl)) {
+            $ttl = Config::get('keycloak-web.cache_openid_ttl', 86400);
+            $this->cacheOpenidTtl = ($ttl === null || $ttl === '') ? null : (int) $ttl;
+        }
+
+        if (is_null($this->verifySignature)) {
+            $this->verifySignature = (bool) Config::get('keycloak-web.verify_signature', true);
+        }
+
+        if (is_null($this->realmPublicKey)) {
+            $this->realmPublicKey = Config::get('keycloak-web.realm_public_key');
+        }
+
+        if (is_null($this->cacheUserProfile)) {
+            $this->cacheUserProfile = (bool) Config::get('keycloak-web.cache_user_profile', false);
+        }
+
         if (is_null($this->callbackUrl)) {
             $this->callbackUrl = route('keycloak.callback');
         }
@@ -137,7 +193,7 @@ class KeycloakService
             $this->redirectLogout = Config::get('keycloak-web.redirect_logout');
         }
 
-        $this->scopes = array_merge($this->scopes, Config::get('keycloak-web.scopes'));
+        $this->scopes = array_values(array_unique(array_merge($this->scopes, (array) Config::get('keycloak-web.scopes', []))));
 
         $this->state = $this->generateRandomState();
         $this->httpClient = $client;
@@ -254,7 +310,6 @@ class KeycloakService
             'client_id' => $this->getClientId(),
             'grant_type' => 'refresh_token',
             'refresh_token' => $credentials['refresh_token'],
-            'redirect_uri' => $this->callbackUrl,
         ];
 
         if (! empty($this->clientSecret)) {
@@ -308,7 +363,6 @@ class KeycloakService
     /**
      * Get access token from Code
      * @param  array $credentials
-     * @throws Exception
      * @return array
      */
     public function getUserProfile($credentials)
@@ -321,7 +375,7 @@ class KeycloakService
             $token = new KeycloakAccessToken($credentials);
 
             if (empty($token->getAccessToken())) {
-                throw new Exception('Access Token is invalid.');
+                throw new KeycloakTokenException('Access Token is invalid.');
             }
 
             $claims = array(
@@ -330,6 +384,13 @@ class KeycloakService
             );
 
             $token->validateIdToken($claims);
+            $this->verifyTokenSignatures($token);
+
+            // Same access token as last request: reuse the profile
+            $cached = $this->cacheUserProfile ? session()->get(self::KEYCLOAK_SESSION_PROFILE) : null;
+            if (! empty($cached['user']) && hash_equals((string) ($cached['token'] ?? ''), $this->hashToken($token->getAccessToken()))) {
+                return $cached['user'];
+            }
 
             // Get userinfo
             $url = $this->getOpenIdValue('userinfo_endpoint');
@@ -341,18 +402,32 @@ class KeycloakService
             $response = $this->httpClient->request('GET', $url, ['headers' => $headers]);
 
             if ($response->getStatusCode() !== 200) {
-                throw new Exception('Was not able to get userinfo (not 200)');
+                throw new KeycloakRequestException('Was not able to get userinfo (not 200)');
             }
 
             $user = $response->getBody()->getContents();
             $user = json_decode($user, true);
 
+            if (! is_array($user)) {
+                throw new KeycloakRequestException('Userinfo response is not valid JSON.');
+            }
+
             // Validate retrieved user is owner of token
-            $token->validateSub($user['sub'] ?? '');
+            if (! $token->validateSub($user['sub'] ?? '')) {
+                throw new KeycloakTokenException('Userinfo "sub" does not match the ID Token.');
+            }
+
+            if ($this->cacheUserProfile) {
+                session()->put(self::KEYCLOAK_SESSION_PROFILE, [
+                    'token' => $this->hashToken($token->getAccessToken()),
+                    'user' => $user,
+                ]);
+            }
         } catch (GuzzleException $e) {
             $this->logException($e);
         } catch (Exception $e) {
-            Log::error('[Keycloak Service] ' . print_r($e->getMessage(), true));
+            $user = [];
+            $this->reportException($e);
         }
 
         return $user;
@@ -386,7 +461,7 @@ class KeycloakService
      */
     public function forgetToken()
     {
-        session()->forget(self::KEYCLOAK_SESSION);
+        session()->forget([self::KEYCLOAK_SESSION, self::KEYCLOAK_SESSION_PROFILE, '_keycloak_remembered']);
         session()->save();
     }
 
@@ -533,20 +608,145 @@ class KeycloakService
 
             if ($response->getStatusCode() === 200) {
                 $configuration = $response->getBody()->getContents();
-                $configuration = json_decode($configuration, true);
+                $configuration = json_decode($configuration, true) ?: [];
             }
         } catch (GuzzleException $e) {
-            $this->logException($e);
-
-            throw new Exception('[Keycloak Error] It was not possible to load OpenId configuration: ' . $e->getMessage());
+            throw new KeycloakRequestException('[Keycloak Error] It was not possible to load OpenId configuration: ' . $e->getMessage(), 0, $e);
         }
 
         // Save cache
-        if ($this->cacheOpenid) {
-            Cache::put($cacheKey, $configuration);
+        if ($this->cacheOpenid && ! empty($configuration)) {
+            Cache::put($cacheKey, $configuration, $this->cacheOpenidTtl);
         }
 
         return $configuration;
+    }
+
+    /**
+     * Verify the signature of the access and ID tokens
+     *
+     * @param  KeycloakAccessToken $token
+     * @throws KeycloakTokenException
+     * @return void
+     */
+    protected function verifyTokenSignatures(KeycloakAccessToken $token)
+    {
+        if (! $this->verifySignature) {
+            return;
+        }
+
+        foreach ([$token->getAccessToken(), $token->getIdToken()] as $jwt) {
+            if (empty($jwt)) {
+                continue;
+            }
+
+            try {
+                $this->decodeJwt($jwt, $this->getSigningKeys());
+            } catch (\UnexpectedValueException $e) {
+                // Unknown "kid": keys may have been rotated, so try again without cache
+                if (! empty($this->realmPublicKey) || strpos($e->getMessage(), '"kid"') === false) {
+                    throw new KeycloakTokenException('Token signature is invalid: ' . $e->getMessage(), 0, $e);
+                }
+
+                try {
+                    $this->decodeJwt($jwt, $this->getSigningKeys(true));
+                } catch (Exception $e) {
+                    throw new KeycloakTokenException('Token signature is invalid: ' . $e->getMessage(), 0, $e);
+                }
+            } catch (KeycloakException $e) {
+                throw $e;
+            } catch (Exception $e) {
+                throw new KeycloakTokenException('Token signature is invalid: ' . $e->getMessage(), 0, $e);
+            }
+        }
+    }
+
+    /**
+     * Decode a JWT checking its signature
+     *
+     * Time based claims are validated by KeycloakAccessToken, so we allow
+     * a small leeway here to avoid failing for clock drift.
+     *
+     * @param  string $jwt
+     * @param  Key|array $keys
+     * @return void
+     */
+    protected function decodeJwt($jwt, $keys)
+    {
+        $leeway = JWT::$leeway;
+        JWT::$leeway = max($leeway, 60);
+
+        try {
+            JWT::decode($jwt, $keys);
+        } finally {
+            JWT::$leeway = $leeway;
+        }
+    }
+
+    /**
+     * Get the keys used to verify the token signatures
+     *
+     * Uses "realm_public_key" when configured, otherwise the realm JWKS.
+     *
+     * @param  bool $fresh Ignore cache
+     * @throws KeycloakException
+     * @return Key|Key[]
+     */
+    protected function getSigningKeys($fresh = false)
+    {
+        if (! empty($this->realmPublicKey)) {
+            $key = trim($this->realmPublicKey);
+
+            if (strpos($key, '-----BEGIN') === false) {
+                $key = "-----BEGIN PUBLIC KEY-----\n" . wordwrap($key, 64, "\n", true) . "\n-----END PUBLIC KEY-----";
+            }
+
+            return new Key($key, 'RS256');
+        }
+
+        $cacheKey = 'keycloak_web_guard_jwks-' . $this->realm . '-' . md5($this->baseUrl);
+
+        $jwks = ($this->cacheOpenid && ! $fresh) ? Cache::get($cacheKey, []) : [];
+
+        if (empty($jwks)) {
+            $url = $this->getOpenIdValue('jwks_uri');
+            if (empty($url)) {
+                throw new KeycloakException('[Keycloak Error] OpenId configuration has no "jwks_uri".');
+            }
+
+            try {
+                $response = $this->httpClient->request('GET', $url);
+                $jwks = json_decode($response->getBody()->getContents(), true) ?: [];
+            } catch (GuzzleException $e) {
+                throw new KeycloakRequestException('[Keycloak Error] It was not possible to load the realm keys: ' . $e->getMessage(), 0, $e);
+            }
+
+            // Only signature keys
+            $jwks['keys'] = array_values(array_filter($jwks['keys'] ?? [], function ($key) {
+                return ($key['use'] ?? 'sig') === 'sig';
+            }));
+
+            if (empty($jwks['keys'])) {
+                throw new KeycloakException('[Keycloak Error] The realm has no signature keys.');
+            }
+
+            if ($this->cacheOpenid) {
+                Cache::put($cacheKey, $jwks, $this->cacheOpenidTtl);
+            }
+        }
+
+        return JWK::parseKeySet($jwks, 'RS256');
+    }
+
+    /**
+     * Hash a token to be stored in session
+     *
+     * @param  string $token
+     * @return string
+     */
+    protected function hashToken($token)
+    {
+        return hash('sha256', (string) $token);
     }
 
     /**
@@ -578,25 +778,32 @@ class KeycloakService
     }
 
     /**
-     * Log a GuzzleException
+     * Report a GuzzleException
      *
      * @param  GuzzleException $e
      * @return void
      */
     protected function logException(GuzzleException $e)
     {
-        // Guzzle 7
-        if (! method_exists($e, 'getResponse') || empty($e->getResponse())) {
-            Log::error('[Keycloak Service] ' . $e->getMessage());
-            return;
+        $this->reportException(KeycloakRequestException::fromGuzzle($e));
+    }
+
+    /**
+     * Send an exception to Laravel's exception handler, so the app decides
+     * whether and how it is logged (dontReport, level, reportable...).
+     *
+     * @param  Throwable $e
+     * @return void
+     */
+    protected function reportException(Throwable $e)
+    {
+        if ($e instanceof GuzzleException) {
+            $e = KeycloakRequestException::fromGuzzle($e);
+        } elseif (! $e instanceof KeycloakException) {
+            $e = new KeycloakException('[Keycloak Service] ' . $e->getMessage(), 0, $e);
         }
 
-        $error = [
-            'request' => method_exists($e, 'getRequest') ? $e->getRequest() : '',
-            'response' => $e->getResponse()->getBody()->getContents(),
-        ];
-
-        Log::error('[Keycloak Service] ' . print_r($error, true));
+        report($e);
     }
 
     /**

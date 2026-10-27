@@ -1,14 +1,14 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Controllers;
+namespace Uepg\KeycloakWebGuard\Controllers;
 
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Auth;
-use Vizir\KeycloakWebGuard\Exceptions\KeycloakCallbackException;
-use Vizir\KeycloakWebGuard\Facades\KeycloakWeb;
+use Uepg\KeycloakWebGuard\Exceptions\KeycloakCallbackException;
+use Uepg\KeycloakWebGuard\Facades\KeycloakWeb;
 
 class AuthController extends Controller
 {
@@ -33,10 +33,17 @@ class AuthController extends Controller
     public function logout()
     {
         $url = KeycloakWeb::getLogoutUrl();
+        $user = Auth::user();
+
         KeycloakWeb::forgetToken();
-      
-        event(new Logout(Auth::getDefaultDriver(), Auth()->user()));
-      
+
+        if ($user) {
+            $guard = Auth::guard();
+            $name = method_exists($guard, 'getName') ? $guard->getName() : Auth::getDefaultDriver();
+
+            event(new Logout($name, $user));
+        }
+
         return redirect($url);
     }
 

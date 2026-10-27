@@ -1,6 +1,6 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Auth\Guard;
+namespace Uepg\KeycloakWebGuard\Auth\Guard;
 
 use Illuminate\Auth\Events\Authenticated;
 use Illuminate\Contracts\Auth\Authenticatable;
@@ -8,14 +8,19 @@ use Illuminate\Contracts\Auth\Guard;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Config;
-use Vizir\KeycloakWebGuard\Auth\KeycloakAccessToken;
-use Vizir\KeycloakWebGuard\Exceptions\KeycloakCallbackException;
-use Vizir\KeycloakWebGuard\Models\KeycloakUser;
-use Vizir\KeycloakWebGuard\Facades\KeycloakWeb;
+use Uepg\KeycloakWebGuard\Auth\KeycloakAccessToken;
+use Uepg\KeycloakWebGuard\Auth\KeycloakWebUserProvider;
+use Uepg\KeycloakWebGuard\Models\KeycloakUser;
+use Uepg\KeycloakWebGuard\Facades\KeycloakWeb;
 use Illuminate\Contracts\Auth\UserProvider;
 
 class KeycloakWebGuard implements Guard
 {
+    /**
+     * Session key to remember users only once per session (or when profile changes)
+     */
+    public const REMEMBERED_SESSION = '_keycloak_remembered';
+
     /**
      * @var null|Authenticatable|KeycloakUser
      */
@@ -31,10 +36,36 @@ class KeycloakWebGuard implements Guard
      */
     protected $request;
 
-    public function __construct(UserProvider $provider, Request $request)
+    /**
+     * Avoid recursion: reporting an error during authentication makes
+     * Laravel's exception handler call Auth::id() again.
+     *
+     * @var bool
+     */
+    protected $authenticating = false;
+
+    /**
+     * The guard name
+     *
+     * @var string|null
+     */
+    protected $name;
+
+    public function __construct(UserProvider $provider, Request $request, $name = null)
     {
         $this->provider = $provider;
         $this->request = $request;
+        $this->name = $name;
+    }
+
+    /**
+     * Get the guard name
+     *
+     * @return string
+     */
+    public function getName()
+    {
+        return $this->name ?: Auth::getDefaultDriver();
     }
 
     /**
@@ -116,8 +147,6 @@ class KeycloakWebGuard implements Guard
      *
      * @param  array  $credentials
      *
-     * @throws BadMethodCallException
-     *
      * @return bool
      */
     public function validate(array $credentials = [])
@@ -138,10 +167,32 @@ class KeycloakWebGuard implements Guard
     /**
      * Try to authenticate the user
      *
-     * @throws KeycloakCallbackException
+     * Errors are reported by KeycloakService, so we just return false here
+     * and let the app redirect to login.
+     *
      * @return bool
      */
     public function authenticate()
+    {
+        if ($this->authenticating) {
+            return false;
+        }
+
+        $this->authenticating = true;
+
+        try {
+            return $this->attemptAuthentication();
+        } finally {
+            $this->authenticating = false;
+        }
+    }
+
+    /**
+     * Retrieve the user from Keycloak using the token in session
+     *
+     * @return bool
+     */
+    protected function attemptAuthentication()
     {
         // Get Credentials
         $credentials = KeycloakWeb::retrieveToken();
@@ -153,20 +204,46 @@ class KeycloakWebGuard implements Guard
         if (empty($user)) {
             KeycloakWeb::forgetToken();
 
-            if (Config::get('app.debug', false)) {
-                throw new KeycloakCallbackException('User cannot be authenticated.');
-            }
-
             return false;
         }
 
         // Provide User
-        $user = $this->provider->retrieveByCredentials($user);
-        $this->setUser($user);
+        $profile = $user;
+        $user = $this->provider->retrieveByCredentials($profile);
+        if (empty($user)) {
+            return false;
+        }
 
-        event(new Authenticated(Auth::getDefaultDriver(), Auth()->user()));
+        $this->setUser($user);
+        $this->rememberUser($user, $profile);
+
+        event(new Authenticated($this->getName(), $user));
 
         return true;
+    }
+
+    /**
+     * Remember the user profile once per session (see KeycloakWebUserProvider::retrieveById)
+     *
+     * @param  Authenticatable $user
+     * @param  array $profile
+     * @return void
+     */
+    protected function rememberUser(Authenticatable $user, array $profile)
+    {
+        if (! Config::get('keycloak-web.remember_users', false) || ! $this->provider instanceof KeycloakWebUserProvider) {
+            return;
+        }
+
+        $session = $this->request->hasSession() ? $this->request->session() : session();
+        $hash = hash('sha256', json_encode($profile));
+
+        if ($session->get(self::REMEMBERED_SESSION) === $hash) {
+            return;
+        }
+
+        $this->provider->rememberUser($user, $profile);
+        $session->put(self::REMEMBERED_SESSION, $hash);
     }
 
     /**
@@ -174,8 +251,8 @@ class KeycloakWebGuard implements Guard
      *
      * @param string $resource Default is empty: point to client_id
      *
-     * @return bool|array
-    */
+     * @return array Empty when user is not authenticated
+     */
     public function roles($resource = '')
     {
         if (empty($resource)) {
@@ -183,13 +260,13 @@ class KeycloakWebGuard implements Guard
         }
 
         if (! $this->check()) {
-            return false;
+            return [];
         }
 
         $token = KeycloakWeb::retrieveToken();
 
         if (empty($token) || empty($token['access_token'])) {
-            return false;
+            return [];
         }
 
         $token = new KeycloakAccessToken($token);
@@ -202,7 +279,7 @@ class KeycloakWebGuard implements Guard
         $realmRoles = $token['realm_access'] ?? [];
         $realmRoles = $realmRoles['roles'] ?? [];
 
-        return array_merge($resourceRoles, $realmRoles);
+        return array_values(array_unique(array_merge($resourceRoles, $realmRoles)));
     }
 
     /**
@@ -215,6 +292,10 @@ class KeycloakWebGuard implements Guard
      */
     public function hasRole($roles, $resource = '')
     {
+        if (! $this->check()) {
+            return false;
+        }
+
         return empty(array_diff((array) $roles, $this->roles($resource)));
     }
 }

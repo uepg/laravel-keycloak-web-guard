@@ -3,7 +3,7 @@
     <img src="https://img.shields.io/packagist/dt/vizir/laravel-keycloak-web-guard.svg" />
 </p>
 
-# [NEEDS A MAINTAINER] Keycloak Web Guard for Laravel
+#  Keycloak Web Guard for Laravel
 
 This packages allow you authenticate users with [Keycloak Server](https://www.keycloak.org).
 
@@ -244,6 +244,8 @@ Route::prefix('admin')
 Route::group(['middleware' => 'keycloak-web'], function () {
     Route::get('/admin', 'Controller@admin');
 });
+
+
 ```
 
 ### Where the access/refresh tokens and state are persisted?
@@ -309,6 +311,6 @@ Just add the options you would like to `guzzle_options` array on `keycloak-web.p
 
 ## Developers
 
-* Mário Valney [@mariovalney](https://twitter.com/mariovalney)
+* Mário Valney[@mariovalney](https://twitter.com/mariovalney) is the original developer of this package, now the Ponta Grossa State University is mantaining this fork.
 
 With contributors on GitHub :heart:

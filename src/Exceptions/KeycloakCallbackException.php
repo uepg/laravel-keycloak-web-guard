@@ -1,16 +1,13 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Exceptions;
+namespace Uepg\KeycloakWebGuard\Exceptions;
 
-class KeycloakCallbackException extends \RuntimeException
+class KeycloakCallbackException extends KeycloakException
 {
     /**
      * Keycloak Callback Error
      *
-     * @param string|null     $message  [description]
-     * @param \Throwable|null $previous [description]
-     * @param array           $headers  [description]
-     * @param int|integer     $code     [description]
+     * @param string $error
      */
     public function __construct(string $error = '')
     {

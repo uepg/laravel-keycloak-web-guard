@@ -1,8 +1,8 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Auth;
+namespace Uepg\KeycloakWebGuard\Auth;
 
-use Exception;
+use Uepg\KeycloakWebGuard\Exceptions\KeycloakTokenException;
 
 class KeycloakAccessToken
 {
@@ -98,14 +98,14 @@ class KeycloakAccessToken
     /**
      * Check the ID Token
      *
-     * @throws Exception
+     * @throws KeycloakTokenException
      * @return void
      */
     public function validateIdToken($claims)
     {
         $token = $this->parseIdToken();
         if (empty($token)) {
-            throw new Exception('ID Token is invalid.');
+            throw new KeycloakTokenException('ID Token is invalid.');
         }
 
         $default = array(
@@ -119,32 +119,33 @@ class KeycloakAccessToken
 
         // Validate expiration
         if (time() >= (int) $token['exp']) {
-            throw new Exception('ID Token already expired.');
+            throw new KeycloakTokenException('ID Token already expired.');
         }
 
         // Validate issuer
         if (empty($claims['iss']) || $claims['iss'] !== $token['iss']) {
-            throw new Exception('Access Token has a wrong issuer: must contain issuer from OpenId.');
+            throw new KeycloakTokenException('Access Token has a wrong issuer: must contain issuer from OpenId.');
         }
 
         // Validate audience
         $audience = (array) $token['aud'];
         if (empty($claims['aud']) || ! in_array($claims['aud'], $audience, true)) {
-            throw new Exception('Access Token has a wrong audience: must contain clientId.');
+            throw new KeycloakTokenException('Access Token has a wrong audience: must contain clientId.');
         }
 
         if (count($audience) > 1 && empty($token['azp'])) {
-            throw new Exception('Access Token has a wrong audience: must contain azp claim.');
+            throw new KeycloakTokenException('Access Token has a wrong audience: must contain azp claim.');
         }
 
         if (! empty($token['azp']) && $claims['aud'] !== $token['azp']) {
-            throw new Exception('Access Token has a wrong audience: has azp but is not the clientId.');
+            throw new KeycloakTokenException('Access Token has a wrong audience: has azp but is not the clientId.');
         }
     }
 
     /**
      * Validate sub from ID token
      *
+     * @param  string $userSub
      * @return bool
      */
     public function validateSub($userSub)
@@ -152,7 +153,7 @@ class KeycloakAccessToken
         $sub = $this->parseIdToken();
         $sub = $sub['sub'] ?? '';
 
-        return $sub === $userSub;
+        return $sub !== '' && $sub === $userSub;
     }
 
     /**
@@ -187,10 +188,14 @@ class KeycloakAccessToken
             return [];
         }
 
-        $token = explode('.', $token);
-        $token = $this->base64UrlDecode($token[1]);
+        $parts = explode('.', $token);
+        if (count($parts) !== 3) {
+            return [];
+        }
 
-        return json_decode($token, true);
+        $payload = json_decode($this->base64UrlDecode($parts[1]), true);
+
+        return is_array($payload) ? $payload : [];
     }
 
     /**
@@ -203,6 +208,13 @@ class KeycloakAccessToken
      */
     protected function base64UrlDecode($data)
     {
-        return base64_decode(str_pad(strtr($data, '-_', '+/'), strlen($data) % 4, '=', STR_PAD_RIGHT));
+        $data = strtr($data, '-_', '+/');
+        $padding = strlen($data) % 4;
+
+        if ($padding) {
+            $data .= str_repeat('=', 4 - $padding);
+        }
+
+        return (string) base64_decode($data);
     }
 }

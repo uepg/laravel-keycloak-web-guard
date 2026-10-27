@@ -1,9 +1,9 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Models;
+namespace Uepg\KeycloakWebGuard\Models;
 
-use Auth;
 use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Support\Facades\Auth;
 
 class KeycloakUser implements Authenticatable
 {
@@ -13,8 +13,10 @@ class KeycloakUser implements Authenticatable
      * @var array
      */
     protected $fillable = [
+        'sub',
         'name',
-        'email'
+        'email',
+        'preferred_username',
     ];
 
     /**
@@ -23,16 +25,6 @@ class KeycloakUser implements Authenticatable
      * @var array
      */
     protected $attributes = [];
-
-    /**
-     * @var mixed
-     */
-    protected $id;
-
-    /**
-     * @var mixed|null
-     */
-    protected $email;
 
     /**
      * Constructor
@@ -46,8 +38,6 @@ class KeycloakUser implements Authenticatable
                 $this->attributes[ $key ] = $value;
             }
         }
-
-        $this->id = $this->getKey();
     }
 
     /**
@@ -58,7 +48,22 @@ class KeycloakUser implements Authenticatable
      */
     public function __get(string $name)
     {
+        if ($name === 'id' && ! array_key_exists('id', $this->attributes)) {
+            return $this->getKey();
+        }
+
         return $this->attributes[ $name ] ?? null;
+    }
+
+    /**
+     * Magic method to check attributes
+     *
+     * @param  string $name
+     * @return bool
+     */
+    public function __isset(string $name)
+    {
+        return ! is_null($this->__get($name));
     }
 
     /**
@@ -68,7 +73,7 @@ class KeycloakUser implements Authenticatable
      */
     public function getKey()
     {
-        return $this->email;
+        return $this->attributes['email'] ?? null;
     }
 
     /**
@@ -88,7 +93,7 @@ class KeycloakUser implements Authenticatable
      */
     public function getAuthIdentifier()
     {
-        return $this->email;
+        return $this->getKey();
     }
 
     /**

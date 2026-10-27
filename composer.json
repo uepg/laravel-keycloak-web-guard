@@ -1,7 +1,7 @@
 {
-    "name": "vizir/laravel-keycloak-web-guard",
+    "name": "uepg/laravel-keycloak-web-guard",
     "description": "Simple Keycloak Guard to Laravel Web Routes",
-    "homepage": "https://github.com/Vizir/laravel-keycloak-web-guard",
+    "homepage": "https://github.com/uepg/laravel-keycloak-web-guard",
     "license": "MIT",
     "keywords": [
         "laravel",
@@ -15,23 +15,48 @@
             "email": "mariovalney@gmail.com"
         }
     ],
-    "minimum-stability": "dev",
     "require": {
-        "guzzlehttp/guzzle": "^6.5|^7.0"
+        "php": "^8.2",
+        "firebase/php-jwt": "^6.4",
+        "guzzlehttp/guzzle": "^7.0",
+        "illuminate/auth": "^11.0|^12.0|^13.0",
+        "illuminate/routing": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0|^11.0",
+        "phpunit/phpunit": "^11.0|^12.0"
+    },
+    "replace": {
+        "vizir/laravel-keycloak-web-guard": "self.version"
     },
     "autoload": {
         "psr-4": {
-            "Vizir\\KeycloakWebGuard\\": "src/"
+            "Uepg\\KeycloakWebGuard\\": "src/"
+        },
+        "files": [
+            "src/aliases.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Uepg\\KeycloakWebGuard\\Tests\\": "tests/"
         }
+    },
+    "scripts": {
+        "test": "phpunit"
     },
     "extra": {
         "laravel": {
             "providers": [
-                "Vizir\\KeycloakWebGuard\\KeycloakWebGuardServiceProvider"
+                "Uepg\\KeycloakWebGuard\\KeycloakWebGuardServiceProvider"
             ],
             "aliases": {
-                "KeycloakWeb": "Vizir\\KeycloakWebGuard\\Facades\\KeycloakWeb"
+                "KeycloakWeb": "Uepg\\KeycloakWebGuard\\Facades\\KeycloakWeb"
             }
         }
+    },
+    "config": {
+        "sort-packages": true
     }
 }

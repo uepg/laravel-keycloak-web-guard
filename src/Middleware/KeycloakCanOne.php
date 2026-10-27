@@ -1,6 +1,6 @@
 <?php
 
-namespace Vizir\KeycloakWebGuard\Middleware;
+namespace Uepg\KeycloakWebGuard\Middleware;
 
 use Closure;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -13,12 +13,16 @@ class KeycloakCanOne extends KeycloakAuthenticated
      *
      * @param  \Illuminate\Http\Request  $request
      * @param  \Closure  $next
-     * @param  string|null  $guard
+     * @param  string  ...$guards Roles separated by "|" (one is enough)
      * @return mixed
      */
     public function handle($request, Closure $next, ...$guards)
     {
-        if (empty($guards) && Auth::check()) {
+        if (! Auth::check()) {
+            $this->unauthenticated($request, []);
+        }
+
+        if (empty($guards)) {
             return $next($request);
         }
 

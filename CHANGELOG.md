@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## 5.X - uepg/laravel-keycloak-web-guard
 
+### [5.0.2] - 2026-11-05
+
+* Require `firebase/php-jwt` ^7.0: every 6.x release is flagged by security advisory PKSA-y2cr-5h3j-g3ys (CVE-2025-45769), so Composer refused to install the package. php-jwt 7 rejects keys below the minimum size (RSA keys must be at least 2048 bits, which is the Keycloak default).
+
 ### [5.0.0] - Unreleased
 
 Package renamed to `uepg/laravel-keycloak-web-guard` (it `replace`s `vizir/laravel-keycloak-web-guard`).

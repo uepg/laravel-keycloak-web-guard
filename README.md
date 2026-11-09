@@ -61,7 +61,7 @@ Then read the [CHANGELOG](CHANGELOG.md): token signatures are now verified by de
 If you want to change routes or the default values for Keycloak, publish the config file:
 
 ```
-php artisan vendor:publish  --provider="uepg\KeycloakWebGuard\KeycloakWebGuardServiceProvider"
+php artisan vendor:publish  --provider="Uepg\KeycloakWebGuard\KeycloakWebGuardServiceProvider"
 
 ```
 
